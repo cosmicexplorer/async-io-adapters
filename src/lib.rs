@@ -46,3 +46,4 @@
 
 pub mod buf_reader;
 pub mod ring;
+pub mod sync_io;

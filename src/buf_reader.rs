@@ -7,7 +7,7 @@ use pin_project_lite::pin_project;
 use std::{fmt, pin::Pin};
 
 cfg_if! {
-  if #[cfg(not(feature = "tokio"))] {
+  if #[cfg(not(feature = "tokio-io"))] {
     pin_project! {
       /// The `BufReader` struct adds buffering to any reader.
       ///
@@ -90,7 +90,7 @@ impl<R> BufReader<R> {
       buf: vec![0; capacity].into_boxed_slice(),
       pos: 0,
       cap: 0,
-      #[cfg(feature = "tokio")]
+      #[cfg(feature = "tokio-io")]
       seek_state: SeekState::Init,
     }
   }
@@ -142,8 +142,8 @@ impl<R: fmt::Debug> fmt::Debug for BufReader<R> {
   }
 }
 
-#[cfg(feature = "futures")]
-mod futures {
+#[cfg(feature = "futures-io")]
+mod futures_io {
   use super::BufReader;
 
   use futures_util::{AsyncBufRead, AsyncRead, AsyncSeek, AsyncWrite};
@@ -247,8 +247,8 @@ mod futures {
   }
 }
 
-#[cfg(feature = "tokio")]
-mod tokio {
+#[cfg(feature = "tokio-io")]
+mod tokio_io {
   use super::{BufReader, SeekState};
 
   use tokio::io::{self, AsyncBufRead, AsyncRead, AsyncSeek, AsyncWrite, ReadBuf};

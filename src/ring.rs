@@ -151,6 +151,9 @@ pub mod ring_buffer {
     pub fn remaining_inline(&self) -> usize { self.remaining_inline.load(Ordering::Acquire) }
 
     #[inline]
+    pub fn store_inline(&self, len: usize) { self.remaining_inline.store(len, Ordering::Release); }
+
+    #[inline]
     pub fn fetch_sub_inline(&self, len: usize) {
       debug_assert!(len > 0);
       let prev_inline = self.remaining_inline.fetch_sub(len, Ordering::Release);
@@ -161,7 +164,7 @@ pub mod ring_buffer {
     pub fn fetch_add_inline(&self, len: usize) {
       debug_assert!(len > 0);
       let prev_inline = self.remaining_inline.fetch_add(len, Ordering::Release);
-      debug_assert!(prev_inline + len < self.capacity);
+      debug_assert!(prev_inline + len <= self.capacity);
     }
 
     #[inline]
@@ -181,7 +184,7 @@ pub mod ring_buffer {
 
       if my_new_head == self.capacity {
         debug_assert_eq!(0, self.remaining_inline());
-        self.fetch_add_inline(other_head);
+        self.store_inline(other_head);
         self.store_head(0);
       } else {
         self.store_head(my_new_head);
@@ -263,6 +266,9 @@ pub mod ring_buffer {
 
     pub(crate) fn return_write_lease(&self, permit: &WritePermit<'_>) {
       debug_assert!(self.write.as_ref().load(Ordering::Relaxed) == PermitState::TakenOut);
+      dbg!(&self.write);
+      dbg!(permit);
+      dbg!(permit.len());
 
       let truncated_length = permit.truncated_length();
       if truncated_length > 0 {
@@ -284,6 +290,7 @@ pub mod ring_buffer {
       behavior: LeaseBehavior,
     ) -> Lease<WritePermit<'_>> {
       assert!(requested_length > 0);
+      dbg!(&self.write);
       if self.write.optimistic_is_empty() {
         return Lease::NoSpace;
       }
@@ -322,6 +329,8 @@ pub mod ring_buffer {
 
     pub(crate) fn return_read_lease(&self, permit: &ReadPermit<'_>) {
       debug_assert!(self.read.as_ref().load(Ordering::Relaxed) == PermitState::TakenOut);
+      dbg!(&self.read);
+      dbg!(permit);
 
       let truncated_length = permit.truncated_length();
       if truncated_length > 0 {
@@ -343,6 +352,7 @@ pub mod ring_buffer {
       behavior: LeaseBehavior,
     ) -> Lease<ReadPermit<'_>> {
       assert!(requested_length > 0);
+      dbg!(&self.read);
       if self.read.optimistic_is_empty() {
         return Lease::NoSpace;
       }
@@ -443,6 +453,8 @@ pub mod ring_buffer {
     fn truncate(&mut self, len: usize) -> &mut Self {
       assert!(len <= self.len());
       self.view = &self.view[..len];
+      debug_assert_eq!(self.view.len(), len);
+      dbg!(len);
       self
     }
   }
@@ -489,6 +501,8 @@ pub mod ring_buffer {
     fn truncate(&mut self, len: usize) -> &mut Self {
       assert!(len <= self.len());
       self.view = unsafe { slice::from_raw_parts_mut(self.view.as_ptr() as *mut u8, len) };
+      debug_assert_eq!(self.view.len(), len);
+      dbg!(len);
       self
     }
   }
@@ -526,6 +540,7 @@ pub mod push {
 
   use std::{cell, mem};
 
+  #[derive(Debug)]
   pub struct Pusher<T> {
     elements: cell::UnsafeCell<Vec<T>>,
     state: PermitFlag,
@@ -611,6 +626,7 @@ pub mod futurized {
   /// }
   /// # })}
   /// ```
+  #[derive(Debug)]
   pub struct RingFuturized {
     buf: mem::ManuallyDrop<Ring>,
     read_wakers: Pusher<Waker>,
@@ -715,6 +731,7 @@ pub mod futurized {
     }
   }
 
+  #[derive(Debug)]
   pub struct ReadPermitFuturized<'a> {
     buf: mem::ManuallyDrop<ReadPermit<'a>>,
     read_wakers: &'a Pusher<Waker>,
@@ -784,6 +801,7 @@ pub mod futurized {
     fn deref_mut(&mut self) -> &mut ReadPermit<'a> { &mut self.buf }
   }
 
+  #[derive(Debug)]
   pub struct WritePermitFuturized<'a> {
     buf: mem::ManuallyDrop<WritePermit<'a>>,
     read_wakers: &'a Pusher<Waker>,

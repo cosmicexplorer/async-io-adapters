@@ -42,18 +42,24 @@ homepage.workspace      = true
 repository.workspace    = true
 
 [dependencies]
+async_executors         = "0.7"
+async-lock              = "2.8"
 cfg-if                  = "1"
-futures-util            = { version = "0.3", optional = true, features = ["io"] }
+futures-util            = "0.3"
 num_enum                = "0.7"
 # once_cell               = "1.18"
-# parking_lot             = "0.10"
+oneshot                 = "0.1.6"
+parking_lot             = "0.10"
 pin-project-lite        = "0.2"
 tokio                   = { version = "1", optional = true }
+trait-set               = "0.3"
 
 [features]
-tokio                   = ["dep:tokio"]
-futures                 = ["dep:futures-util"]
-default                 = ["futures", "tokio"]
+tokio-io                = ["tokio"]
+futures-io              = ["futures-util/io"]
+default                 = ["futures-io", "tokio-io"]
 
 [dev-dependencies]
+async_executors         = { version = "0.7", features = ["async_global"] }
+tokio                   = { version = "1", features = ["fs", "io-util"] }
 tokio-test              = "0.4.3"
