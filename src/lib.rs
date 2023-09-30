@@ -7,14 +7,12 @@
  * Licensed under the MIT license (see LICENSE).
  */
 
-//! A set of utilities to symbolically manipulate file contents and directory trees by entering
-//! their contents into a content-addressed store.
-//!
-//! **TODO: support for remote sync!**
+//! ???
 
 /* These clippy lint descriptions are purely non-functional and do not affect the functionality
  * or correctness of the code. */
 // #![warn(missing_docs)]
+
 /* Ensure any doctest warnings fails the doctest! */
 #![doc(test(attr(deny(warnings))))]
 /* Enable all clippy lints except for many of the pedantic ones. It's a shame this needs to be
@@ -46,17 +44,4 @@
 /* Arc<Mutex> can be more clear than needing to grok Orderings. */
 #![allow(clippy::mutex_atomic)]
 
-pub fn add(left: usize, right: usize) -> usize {
-    left + right
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-}
+pub mod buf_reader;

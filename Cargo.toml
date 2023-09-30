@@ -42,5 +42,12 @@ homepage.workspace      = true
 repository.workspace    = true
 
 [dependencies]
-displaydoc.workspace    = true
-thiserror.workspace     = true
+cfg-if                  = "1"
+futures-util            = { version = "0.3", optional = true, features = ["io"] }
+pin-project-lite        = "0.2"
+tokio                   = { version = "1", optional = true }
+
+[features]
+tokio                   = ["dep:tokio"]
+futures                 = ["dep:futures-util"]
+default                 = ["futures"]
