@@ -1,47 +1,43 @@
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub enum LeaseBehavior {
-  AllowSpuriousFailures,
-  NoSpuriousFailures,
-}
+pub mod permit {
+  use std::sync::atomic::{AtomicU8, Ordering};
 
-#[derive(Debug, Copy, Clone)]
-pub enum Lease<Permit> {
-  NoSpace,
-  PossiblyTaken,
-  Taken(Permit),
-}
+  #[derive(Debug, Copy, Clone, PartialEq, Eq)]
+  pub enum LeaseBehavior {
+    AllowSpuriousFailures,
+    NoSpuriousFailures,
+  }
 
-impl<Permit> Lease<Permit> {
-  #[inline]
-  pub fn option(self) -> Option<Permit> {
-    match self {
-      Self::NoSpace => None,
-      Self::PossiblyTaken => None,
-      Self::Taken(permit) => Some(permit),
+  #[derive(Debug, Copy, Clone)]
+  pub enum Lease<Permit> {
+    NoSpace,
+    PossiblyTaken,
+    Taken(Permit),
+  }
+
+  impl<Permit> Lease<Permit> {
+    #[inline]
+    pub fn option(self) -> Option<Permit> {
+      match self {
+        Self::NoSpace => None,
+        Self::PossiblyTaken => None,
+        Self::Taken(permit) => Some(permit),
+      }
     }
   }
-}
 
-#[repr(u8)]
-#[derive(
-  Debug, Copy, Clone, PartialEq, Eq, Default, num_enum::TryFromPrimitive, num_enum::IntoPrimitive,
-)]
-pub enum PermitState {
-  #[default]
-  Unleashed = 0,
-  TakenOut = 1,
-}
+  #[repr(u8)]
+  #[derive(
+    Debug, Copy, Clone, PartialEq, Eq, Default, num_enum::TryFromPrimitive, num_enum::IntoPrimitive,
+  )]
+  pub enum PermitState {
+    #[default]
+    Unleashed = 0,
+    TakenOut = 1,
+  }
 
-pub mod ring {
-  use super::{Lease, LeaseBehavior, PermitState};
-
-  use std::{
-    cmp, ops, slice,
-    sync::atomic::{AtomicU8, AtomicUsize, Ordering},
-  };
 
   #[derive(Debug)]
-  struct PermitFlag {
+  pub(crate) struct PermitFlag {
     state: AtomicU8,
   }
 
@@ -88,6 +84,16 @@ pub mod ring {
       .is_ok()
     }
   }
+}
+pub use permit::Lease;
+
+pub mod ring_buffer {
+  use super::permit::{Lease, LeaseBehavior, PermitFlag, PermitState};
+
+  use std::{
+    cmp, ops, slice,
+    sync::atomic::{AtomicUsize, Ordering},
+  };
 
   #[derive(Debug)]
   struct Half {
@@ -513,348 +519,339 @@ pub mod ring {
     fn deref_mut(&mut self) -> &mut [u8] { &mut self.view }
   }
 }
-pub use ring::{ReadPermit, Ring, TruncateLength, WritePermit};
+pub use ring_buffer::{Ring, TruncateLength};
 
-/* pub mod push { */
-/* use super::PermitState; */
+pub mod push {
+  use super::permit::{LeaseBehavior, PermitFlag};
 
-/* use std::{ */
-/* cell, mem, */
-/* sync::atomic::{AtomicU8, Ordering}, */
-/* }; */
+  use std::{cell, mem};
 
-/* pub struct Pusher<T> { */
-/* elements: cell::UnsafeCell<Vec<T>>, */
-/* state: AtomicU8, */
-/* } */
+  pub struct Pusher<T> {
+    elements: cell::UnsafeCell<Vec<T>>,
+    state: PermitFlag,
+  }
 
-/* impl<T> Pusher<T> { */
-/* pub fn new() -> Self { */
-/* Self { */
-/* elements: cell::UnsafeCell::new(Vec::new()), */
-/* state: AtomicU8::new(PermitState::Unleashed.into()), */
-/* } */
-/* } */
+  impl<T> Pusher<T> {
+    pub fn new() -> Self {
+      Self {
+        elements: cell::UnsafeCell::new(Vec::new()),
+        state: PermitFlag::default(),
+      }
+    }
 
-/* fn within_lock<O, F: FnOnce(&mut Vec<T>) -> O>(&self, f: F) -> O { */
-/* while let Err(_) = self.state.compare_exchange_weak( */
-/* PermitState::Unleashed.into(), */
-/* PermitState::TakenOut.into(), */
-/* Ordering::AcqRel, */
-/* Ordering::Relaxed, */
-/* ) {} */
+    fn within_lock<O, F: FnOnce(&mut Vec<T>) -> O>(&self, f: F) -> O {
+      while !self.state.try_lease(LeaseBehavior::AllowSpuriousFailures) {}
 
-/* let v: &mut Vec<T> = unsafe { &mut *self.elements.get() }; */
-/* let ret = f(v); */
+      let v: &mut Vec<T> = unsafe { &mut *self.elements.get() };
+      let ret = f(v);
 
-/* self */
-/* .state */
-/* .store(PermitState::Unleashed.into(), Ordering::Release); */
+      self.state.release();
 
-/* ret */
-/* } */
+      ret
+    }
 
-/* pub fn push(&self, x: T) { self.within_lock(|v| v.push(x)) } */
+    pub fn push(&self, x: T) { self.within_lock(|v| v.push(x)) }
 
-/* pub fn extract(&self) -> Vec<T> { self.within_lock(|v| mem::take(v)) } */
+    pub fn extract(&self) -> Vec<T> { self.within_lock(|v| mem::take(v)) }
 
-/* pub fn take_owned(&mut self) -> Vec<T> { */
-/* mem::replace(&mut self.elements,
- * cell::UnsafeCell::new(Vec::new())).into_inner() */
-/* } */
-/* } */
+    pub fn take_owned(&mut self) -> Vec<T> {
+      mem::replace(&mut self.elements, cell::UnsafeCell::new(Vec::new())).into_inner()
+    }
+  }
 
-/* unsafe impl<T: Send> Sync for Pusher<T> {} */
-/* } */
+  unsafe impl<T: Send> Sync for Pusher<T> {}
+}
 
-/* pub mod futurized { */
-/* use super::{ */
-/* push::Pusher, */
-/* ring::{ReadPermit, Ring, WritePermit}, */
-/* Lease, */
-/* }; */
+pub mod futurized {
+  use super::{
+    permit::Lease,
+    push::Pusher,
+    ring_buffer::{ReadPermit, Ring, WritePermit},
+  };
 
-/* use once_cell::sync::Lazy; */
-/* use parking_lot::Mutex; */
+  /* use once_cell::sync::Lazy; */
+  /* use parking_lot::Mutex; */
 
-/* use std::{ */
-/* collections::VecDeque, */
-/* mem, ops, */
-/* task::{Context, Poll, Waker}, */
-/* }; */
+  use std::{
+    /* collections::VecDeque, */
+    mem, ops,
+    task::{Context, Poll, Waker},
+  };
 
-/* static RING_BUF_FREE_LIST: Lazy<Mutex<VecDeque<Ring>>> = */
-/* Lazy::new(|| Mutex::new(VecDeque::new())); */
+  /* static RING_BUF_FREE_LIST: Lazy<Mutex<VecDeque<Ring>>> = */
+  /* Lazy::new(|| Mutex::new(VecDeque::new())); */
 
-/* fn get_or_create_ring<F: FnOnce() -> Ring>(f: F) -> Ring { */
-/* RING_BUF_FREE_LIST.lock().pop_front().unwrap_or_else(f) */
-/* } */
+  /* fn get_or_create_ring<F: FnOnce() -> Ring>(f: F) -> Ring { */
+  /* RING_BUF_FREE_LIST.lock().pop_front().unwrap_or_else(f) */
+  /* } */
 
-/* fn return_ring(mut ring: Ring) { */
-/* ring.clear(); */
-/* RING_BUF_FREE_LIST.lock().push_back(ring); */
-/* } */
+  /* fn return_ring(mut ring: Ring) { */
+  /* ring.clear(); */
+  /* RING_BUF_FREE_LIST.lock().push_back(ring); */
+  /* } */
 
-/* ///``` */
-/* /// # fn main() { tokio_test::block_on(async { */
-/* /// use zip::channels::{*, futurized::*}; */
-/* /// use futures_util::future::poll_fn; */
-/* /// use tokio::task; */
-/* /// use std::{cell::UnsafeCell, pin::Pin}; */
-/* /// */
-/* /// let ring = UnsafeCell::new(RingFuturized::new()); */
-/* /// let read_lease = poll_fn(|cx| unsafe { &mut *ring.get()
- * }.poll_read(cx, 5)); */
-/* /// { */
-/* ///   let mut write_lease = poll_fn(|cx| { */
-/* ///     unsafe { &mut *ring.get() }.poll_write(cx, 20) */
-/* ///   }).await; */
-/* ///   write_lease.truncate(5).copy_from_slice(b"hello"); */
-/* /// } */
-/* /// { */
-/* ///   let read_lease = read_lease.await; */
-/* ///   assert_eq!("hello", std::str::from_utf8(&read_lease).unwrap()); */
-/* /// } */
-/* /// # })} */
-/* /// ``` */
-/* pub struct RingFuturized { */
-/* buf: mem::ManuallyDrop<Ring>, */
-/* read_wakers: Pusher<Waker>, */
-/* write_wakers: Pusher<Waker>, */
-/* } */
+  ///```
+  /// # fn main() { tokio_test::block_on(async {
+  /// use async_io_adapters::ring::{*, futurized::*};
+  /// use futures_util::future::poll_fn;
+  /// use std::cell::UnsafeCell;
+  ///
+  /// let buf = Ring::with_capacity(20);
+  /// let ring = UnsafeCell::new(RingFuturized::wrap_ring(buf));
+  /// let read_lease = poll_fn(|cx| unsafe { &mut *ring.get() }.poll_read(cx, 5));
+  /// {
+  ///   let mut write_lease = poll_fn(|cx| {
+  ///     unsafe { &mut *ring.get() }.poll_write(cx, 20)
+  ///   }).await;
+  ///   write_lease.truncate(5).copy_from_slice(b"hello");
+  /// }
+  /// {
+  ///   let read_lease = read_lease.await;
+  ///   assert_eq!("hello", std::str::from_utf8(&read_lease).unwrap());
+  /// }
+  /// # })}
+  /// ```
+  pub struct RingFuturized {
+    buf: mem::ManuallyDrop<Ring>,
+    read_wakers: Pusher<Waker>,
+    write_wakers: Pusher<Waker>,
+  }
 
-/* impl ops::Drop for RingFuturized { */
-/* fn drop(&mut self) { */
-/* let Self { */
-/* buf, */
-/* read_wakers, */
-/* write_wakers, */
-/* } = self; */
-/* for waker in read_wakers */
-/* .take_owned() */
-/* .into_iter() */
-/* .chain(write_wakers.take_owned().into_iter()) */
-/* { */
-/* waker.wake(); */
-/* } */
-/* return_ring(unsafe { mem::ManuallyDrop::take(buf) }); */
-/* } */
-/* } */
+  impl ops::Drop for RingFuturized {
+    fn drop(&mut self) {
+      let Self {
+        buf,
+        read_wakers,
+        write_wakers,
+      } = self;
+      for waker in read_wakers
+        .take_owned()
+        .into_iter()
+        .chain(write_wakers.take_owned().into_iter())
+      {
+        waker.wake();
+      }
+      unsafe {
+        mem::ManuallyDrop::drop(buf);
+      }
+      /* return_ring(unsafe { mem::ManuallyDrop::take(buf) }); */
+    }
+  }
 
-/* impl RingFuturized { */
-/* #[inline] */
-/* pub fn capacity(&self) -> usize { self.buf.capacity() } */
+  impl RingFuturized {
+    #[inline]
+    pub fn capacity(&self) -> usize { self.buf.capacity() }
 
-/* pub fn new() -> Self { */
-/* let ring = get_or_create_ring(|| Ring::with_capacity(8 * 1024)); */
-/* Self { */
-/* buf: mem::ManuallyDrop::new(ring), */
-/* read_wakers: Pusher::<Waker>::new(), */
-/* write_wakers: Pusher::<Waker>::new(), */
-/* } */
-/* } */
+    /* pub fn new() -> Self { */
+    /* let ring = get_or_create_ring(|| Ring::with_capacity(8 * 1024)); */
+    /* Self { */
+    /* buf: mem::ManuallyDrop::new(ring), */
+    /* read_wakers: Pusher::<Waker>::new(), */
+    /* write_wakers: Pusher::<Waker>::new(), */
+    /* } */
+    /* } */
 
-/* /\* pub fn wrap_ring(buf: Ring) -> Self { *\/ */
-/* /\* Self { *\/ */
-/* /\* buf: Arc::new(buf), *\/ */
-/* /\* read_wakers: Arc::new(Pusher::<Waker>::new()), *\/ */
-/* /\* write_wakers: Arc::new(Pusher::<Waker>::new()), *\/ */
-/* /\* } *\/ */
-/* /\* } *\/ */
+    pub fn wrap_ring(buf: Ring) -> Self {
+      Self {
+        buf: mem::ManuallyDrop::new(buf),
+        read_wakers: Pusher::<Waker>::new(),
+        write_wakers: Pusher::<Waker>::new(),
+      }
+    }
 
-/* /\* pub fn poll_read_until_no_space( *\/ */
-/* /\* &mut self, *\/ */
-/* /\* cx: &mut Context<'_>, *\/ */
-/* /\* ) -> Poll<Option<ReadPermitFuturized>> { *\/ */
-/* /\* match self.buf.request_read_lease(self.capacity()) { *\/ */
-/* /\* Lease::NoSpace => Poll::Ready(None), *\/ */
-/* /\* Lease::PossiblyTaken => { *\/ */
-/* /\* self.read_wakers.push(cx.waker().clone()); *\/ */
-/* /\* Poll::Pending *\/ */
-/* /\* } *\/ */
-/* /\* Lease::Taken(permit) => Poll::Ready(Some(ReadPermitFuturized::for_buf(
- * *\/ */
-/* /\* permit, *\/ */
-/* /\* self.read_wakers.clone(), *\/ */
-/* /\* self.write_wakers.clone(), *\/ */
-/* /\* ))), *\/ */
-/* /\* } *\/ */
-/* /\* } *\/ */
+    /* pub fn poll_read_until_no_space( */
+    /* &mut self, */
+    /* cx: &mut Context<'_>, */
+    /* ) -> Poll<Option<ReadPermitFuturized>> { */
+    /* match self.buf.request_read_lease(self.capacity()) { */
+    /* Lease::NoSpace => Poll::Ready(None), */
+    /* Lease::PossiblyTaken => { */
+    /* self.read_wakers.push(cx.waker().clone()); */
+    /* Poll::Pending */
+    /* } */
+    /* Lease::Taken(permit) => Poll::Ready(Some(ReadPermitFuturized::for_buf(
+     */
+    /* permit, */
+    /* self.read_wakers.clone(), */
+    /* self.write_wakers.clone(), */
+    /* ))), */
+    /* } */
+    /* } */
 
-/* pub fn poll_read( */
-/* &mut self, */
-/* cx: &mut Context<'_>, */
-/* requested_length: usize, */
-/* ) -> Poll<ReadPermitFuturized<'_>> { */
-/* match self.buf.request_read_lease(requested_length) { */
-/* Lease::NoSpace | Lease::PossiblyTaken => { */
-/* self.read_wakers.push(cx.waker().clone()); */
-/* Poll::Pending */
-/* }, */
-/* Lease::Taken(permit) => Poll::Ready(ReadPermitFuturized::for_buf( */
-/* permit, */
-/* &self.read_wakers, */
-/* &self.write_wakers, */
-/* )), */
-/* } */
-/* } */
+    pub fn poll_read(
+      &mut self,
+      cx: &mut Context<'_>,
+      requested_length: usize,
+    ) -> Poll<ReadPermitFuturized<'_>> {
+      match self.buf.read_lease_weak(requested_length) {
+        Lease::NoSpace | Lease::PossiblyTaken => {
+          self.read_wakers.push(cx.waker().clone());
+          Poll::Pending
+        },
+        Lease::Taken(permit) => Poll::Ready(ReadPermitFuturized::for_buf(
+          permit,
+          &self.read_wakers,
+          &self.write_wakers,
+        )),
+      }
+    }
 
-/* pub fn poll_write( */
-/* &mut self, */
-/* cx: &mut Context<'_>, */
-/* requested_length: usize, */
-/* ) -> Poll<WritePermitFuturized<'_>> { */
-/* match self.buf.request_write_lease(requested_length) { */
-/* Lease::NoSpace | Lease::PossiblyTaken => { */
-/* self.write_wakers.push(cx.waker().clone()); */
-/* Poll::Pending */
-/* }, */
-/* Lease::Taken(permit) => Poll::Ready(WritePermitFuturized::for_buf( */
-/* permit, */
-/* &self.read_wakers, */
-/* &self.write_wakers, */
-/* )), */
-/* } */
-/* } */
-/* } */
+    pub fn poll_write(
+      &mut self,
+      cx: &mut Context<'_>,
+      requested_length: usize,
+    ) -> Poll<WritePermitFuturized<'_>> {
+      match self.buf.write_lease_weak(requested_length) {
+        Lease::NoSpace | Lease::PossiblyTaken => {
+          self.write_wakers.push(cx.waker().clone());
+          Poll::Pending
+        },
+        Lease::Taken(permit) => Poll::Ready(WritePermitFuturized::for_buf(
+          permit,
+          &self.read_wakers,
+          &self.write_wakers,
+        )),
+      }
+    }
+  }
 
-/* pub struct ReadPermitFuturized<'a> { */
-/* buf: mem::ManuallyDrop<ReadPermit<'a>>, */
-/* read_wakers: &'a Pusher<Waker>, */
-/* write_wakers: &'a Pusher<Waker>, */
-/* } */
+  pub struct ReadPermitFuturized<'a> {
+    buf: mem::ManuallyDrop<ReadPermit<'a>>,
+    read_wakers: &'a Pusher<Waker>,
+    write_wakers: &'a Pusher<Waker>,
+  }
 
-/* impl<'a> ReadPermitFuturized<'a> { */
-/* pub(crate) fn for_buf( */
-/* buf: ReadPermit<'a>, */
-/* read_wakers: &'a Pusher<Waker>, */
-/* write_wakers: &'a Pusher<Waker>, */
-/* ) -> Self { */
-/* Self { */
-/* buf: mem::ManuallyDrop::new(buf), */
-/* read_wakers, */
-/* write_wakers, */
-/* } */
-/* } */
-/* } */
+  impl<'a> ReadPermitFuturized<'a> {
+    pub(crate) fn for_buf(
+      buf: ReadPermit<'a>,
+      read_wakers: &'a Pusher<Waker>,
+      write_wakers: &'a Pusher<Waker>,
+    ) -> Self {
+      Self {
+        buf: mem::ManuallyDrop::new(buf),
+        read_wakers,
+        write_wakers,
+      }
+    }
+  }
 
-/* impl<'a> ops::Drop for ReadPermitFuturized<'a> { */
-/* fn drop(&mut self) { */
-/* let Self { */
-/* buf, */
-/* read_wakers, */
-/* write_wakers, */
-/* } = self; */
-/* let was_empty = buf.is_empty(); */
-/* /\* Drop the ReadPermit first to close out the owned region in the parent
- * Ring */
-/* * before waking up any tasks. *\/ */
-/* unsafe { */
-/* mem::ManuallyDrop::drop(buf); */
-/* } */
-/* /\* Notify any blocked readers. *\/ */
-/* for waker in read_wakers.extract().into_iter() { */
-/* waker.wake(); */
-/* } */
-/* if !was_empty { */
-/* /\* Notify any blocked writers. *\/ */
-/* for waker in write_wakers.extract().into_iter() { */
-/* waker.wake(); */
-/* } */
-/* } */
-/* } */
-/* } */
+  impl<'a> ops::Drop for ReadPermitFuturized<'a> {
+    fn drop(&mut self) {
+      let Self {
+        buf,
+        read_wakers,
+        write_wakers,
+      } = self;
+      let was_empty = buf.is_empty();
+      /* Drop the ReadPermit first to close out the owned region in the parent
+      Ring
+      * before waking up any tasks. */
+      unsafe {
+        mem::ManuallyDrop::drop(buf);
+      }
+      /* Notify any blocked readers. */
+      for waker in read_wakers.extract().into_iter() {
+        waker.wake();
+      }
+      if !was_empty {
+        /* Notify any blocked writers. */
+        for waker in write_wakers.extract().into_iter() {
+          waker.wake();
+        }
+      }
+    }
+  }
 
-/* impl<'a> AsRef<ReadPermit<'a>> for ReadPermitFuturized<'a> { */
-/* #[inline] */
-/* fn as_ref(&self) -> &ReadPermit<'a> { &self.buf } */
-/* } */
+  impl<'a> AsRef<ReadPermit<'a>> for ReadPermitFuturized<'a> {
+    #[inline]
+    fn as_ref(&self) -> &ReadPermit<'a> { &self.buf }
+  }
 
-/* impl<'a> AsMut<ReadPermit<'a>> for ReadPermitFuturized<'a> { */
-/* #[inline] */
-/* fn as_mut(&mut self) -> &mut ReadPermit<'a> { &mut self.buf } */
-/* } */
+  impl<'a> AsMut<ReadPermit<'a>> for ReadPermitFuturized<'a> {
+    #[inline]
+    fn as_mut(&mut self) -> &mut ReadPermit<'a> { &mut self.buf }
+  }
 
-/* impl<'a> ops::Deref for ReadPermitFuturized<'a> { */
-/* type Target = ReadPermit<'a>; */
+  impl<'a> ops::Deref for ReadPermitFuturized<'a> {
+    type Target = ReadPermit<'a>;
 
-/* #[inline] */
-/* fn deref(&self) -> &ReadPermit<'a> { &self.buf } */
-/* } */
+    #[inline]
+    fn deref(&self) -> &ReadPermit<'a> { &self.buf }
+  }
 
-/* impl<'a> ops::DerefMut for ReadPermitFuturized<'a> { */
-/* #[inline] */
-/* fn deref_mut(&mut self) -> &mut ReadPermit<'a> { &mut self.buf } */
-/* } */
+  impl<'a> ops::DerefMut for ReadPermitFuturized<'a> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut ReadPermit<'a> { &mut self.buf }
+  }
 
-/* pub struct WritePermitFuturized<'a> { */
-/* buf: mem::ManuallyDrop<WritePermit<'a>>, */
-/* read_wakers: &'a Pusher<Waker>, */
-/* write_wakers: &'a Pusher<Waker>, */
-/* } */
+  pub struct WritePermitFuturized<'a> {
+    buf: mem::ManuallyDrop<WritePermit<'a>>,
+    read_wakers: &'a Pusher<Waker>,
+    write_wakers: &'a Pusher<Waker>,
+  }
 
-/* impl<'a> WritePermitFuturized<'a> { */
-/* pub(crate) fn for_buf( */
-/* buf: WritePermit<'a>, */
-/* read_wakers: &'a Pusher<Waker>, */
-/* write_wakers: &'a Pusher<Waker>, */
-/* ) -> Self { */
-/* Self { */
-/* buf: mem::ManuallyDrop::new(buf), */
-/* read_wakers, */
-/* write_wakers, */
-/* } */
-/* } */
-/* } */
+  impl<'a> WritePermitFuturized<'a> {
+    pub(crate) fn for_buf(
+      buf: WritePermit<'a>,
+      read_wakers: &'a Pusher<Waker>,
+      write_wakers: &'a Pusher<Waker>,
+    ) -> Self {
+      Self {
+        buf: mem::ManuallyDrop::new(buf),
+        read_wakers,
+        write_wakers,
+      }
+    }
+  }
 
-/* impl<'a> ops::Drop for WritePermitFuturized<'a> { */
-/* fn drop(&mut self) { */
-/* let Self { */
-/* buf, */
-/* read_wakers, */
-/* write_wakers, */
-/* } = self; */
-/* let was_empty = buf.is_empty(); */
-/* /\* Drop the WritePermit first to close out the owned region in the parent */
-/* * Ring before waking up any tasks. *\/ */
-/* unsafe { */
-/* mem::ManuallyDrop::drop(buf); */
-/* } */
-/* /\* Notify any blocked writers. *\/ */
-/* for waker in write_wakers.extract().into_iter() { */
-/* waker.wake(); */
-/* } */
-/* if !was_empty { */
-/* /\* Notify any blocked readers. *\/ */
-/* for waker in read_wakers.extract().into_iter() { */
-/* waker.wake(); */
-/* } */
-/* } */
-/* } */
-/* } */
+  impl<'a> ops::Drop for WritePermitFuturized<'a> {
+    fn drop(&mut self) {
+      let Self {
+        buf,
+        read_wakers,
+        write_wakers,
+      } = self;
+      let was_empty = buf.is_empty();
+      /* Drop the WritePermit first to close out the owned region in the parent
+       * Ring before waking up any tasks. */
+      unsafe {
+        mem::ManuallyDrop::drop(buf);
+      }
+      /* Notify any blocked writers. */
+      for waker in write_wakers.extract().into_iter() {
+        waker.wake();
+      }
+      if !was_empty {
+        /* Notify any blocked readers. */
+        for waker in read_wakers.extract().into_iter() {
+          waker.wake();
+        }
+      }
+    }
+  }
 
-/* impl<'a> AsRef<WritePermit<'a>> for WritePermitFuturized<'a> { */
-/* #[inline] */
-/* fn as_ref(&self) -> &WritePermit<'a> { &self.buf } */
-/* } */
+  impl<'a> AsRef<WritePermit<'a>> for WritePermitFuturized<'a> {
+    #[inline]
+    fn as_ref(&self) -> &WritePermit<'a> { &self.buf }
+  }
 
-/* impl<'a> AsMut<WritePermit<'a>> for WritePermitFuturized<'a> { */
-/* #[inline] */
-/* fn as_mut(&mut self) -> &mut WritePermit<'a> { &mut self.buf } */
-/* } */
+  impl<'a> AsMut<WritePermit<'a>> for WritePermitFuturized<'a> {
+    #[inline]
+    fn as_mut(&mut self) -> &mut WritePermit<'a> { &mut self.buf }
+  }
 
-/* impl<'a> ops::Deref for WritePermitFuturized<'a> { */
-/* type Target = WritePermit<'a>; */
+  impl<'a> ops::Deref for WritePermitFuturized<'a> {
+    type Target = WritePermit<'a>;
 
-/* #[inline] */
-/* fn deref(&self) -> &WritePermit<'a> { &self.buf } */
-/* } */
+    #[inline]
+    fn deref(&self) -> &WritePermit<'a> { &self.buf }
+  }
 
-/* impl<'a> ops::DerefMut for WritePermitFuturized<'a> { */
-/* #[inline] */
-/* fn deref_mut(&mut self) -> &mut WritePermit<'a> { &mut self.buf } */
-/* } */
-/* } */
+  impl<'a> ops::DerefMut for WritePermitFuturized<'a> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut WritePermit<'a> { &mut self.buf }
+  }
+}
 
 /* impl std::io::Read for RingBuffer { */
 /* fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> { */
