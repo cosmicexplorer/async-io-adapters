@@ -45,3 +45,4 @@
 #![allow(clippy::mutex_atomic)]
 
 pub mod buf_reader;
+pub mod ring;
